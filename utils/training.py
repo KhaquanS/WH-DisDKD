@@ -1,0 +1,438 @@
+import time
+from pathlib import Path
+import torch
+import torch.nn as nn
+import torch.optim as optim
+from torch.optim.lr_scheduler import StepLR
+from tqdm import tqdm
+
+from utils.utils import accuracy, AverageMeter
+from utils.model_factory import create_distillation_model, print_model_parameters
+from utils.checkpoint import save_checkpoint
+
+
+class Trainer:
+    """Handles model training and validation."""
+    
+    def __init__(self, teacher, student, num_classes, criterion, loss_tracker, device, args):
+        self.teacher = teacher
+        self.student = student
+        self.num_classes = num_classes
+        self.criterion = criterion
+        self.loss_tracker = loss_tracker
+        self.device = device
+        self.args = args
+        
+        # Create distillation model
+        self.model = create_distillation_model(args, teacher, student, num_classes).to(device)
+        print_model_parameters(self.model, args.method)
+        
+        # Setup optimizers
+        self._setup_optimizers()
+
+    def _setup_optimizers(self):
+        """Setup optimizer(s) and scheduler(s)."""
+        args = self.args
+        
+        # Methods with discriminator need separate optimizers
+        if args.method in ['DisDKD']:
+            self.student_optimizer, self.student_scheduler = self._create_optimizer(self.model)
+            
+            discriminator_obj = getattr(self.model, 'discriminator', None)
+            if discriminator_obj is not None:
+                self.discriminator_optimizer = optim.Adam(
+                    discriminator_obj.parameters(), 
+                    lr=args.discriminator_lr * args.disc_lr_multiplier,
+                    weight_decay=args.weight_decay
+                )
+            else:
+                self.discriminator_optimizer = None
+                print(f"Warning: {args.method} selected but no discriminator found.")
+        else:
+            self.student_optimizer, self.student_scheduler = self._create_optimizer(self.model)
+            self.discriminator_optimizer = None
+
+    def _create_optimizer(self, model):
+        """Create optimizer and scheduler for a model."""
+        args = self.args
+        
+        optimizers = {
+            'adam': optim.Adam,
+            'sgd': optim.SGD,
+            'adamw': optim.AdamW
+        }
+        
+        optimizer_class = optimizers[args.optimizer.lower()]
+        optimizer_kwargs = {'lr': args.lr, 'weight_decay': args.weight_decay}
+        
+        if args.optimizer.lower() == 'sgd':
+            optimizer_kwargs['momentum'] = args.momentum
+        
+        optimizer = optimizer_class(model.parameters(), **optimizer_kwargs)
+        scheduler = StepLR(optimizer, step_size=args.step_size, gamma=args.lr_decay)
+        
+        return optimizer, scheduler
+
+    def train(self, train_loader, val_loader):
+        """Main training loop."""
+        print(f"\nStarting training for {self.args.epochs} epochs...")
+        best_acc = 0.0
+        
+        for epoch in range(self.args.epochs):
+            start_time = time.time()
+            
+            # Train and validate
+            if self.args.method in ['DisDKD']:
+                train_losses, train_acc = self._train_epoch_adversarial(train_loader, epoch)
+            else:
+                train_losses, train_acc = self._train_epoch_standard(train_loader, epoch)
+            
+            val_losses, val_acc = self._validate(val_loader, epoch)
+            
+            # Log losses
+            self.loss_tracker.log_epoch(epoch, 'train', train_losses, train_acc)
+            self.loss_tracker.log_epoch(epoch, 'val', val_losses, val_acc)
+            
+            self.student_scheduler.step()
+            
+            # Print epoch summary
+            elapsed = time.time() - start_time
+            print(f'Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}%, Time {elapsed:.1f}s')
+            
+            # Save best model
+            if val_acc > best_acc:
+                best_acc = val_acc
+                save_checkpoint(self.model, self.student_optimizer, epoch, val_acc, 
+                            self.args, is_best=True)
+            
+            print('-' * 80)
+        
+        return best_acc
+
+    def _train_epoch_standard(self, train_loader, epoch):
+        """Train for one epoch (standard methods)."""
+        self.model.train()
+        meters = self._init_meters()
+        
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} Train", leave=False)
+        
+        for batch_idx, batch_data in enumerate(progress_bar):
+            # Handle different data formats
+            if self.args.method == "CRD":
+                inputs, targets, indices = batch_data
+                self.model.set_sample_indices(indices)
+            else:
+                inputs, targets = batch_data
+            
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            self.student_optimizer.zero_grad()
+            
+            # Forward pass
+            if self.args.method in ['DKD']:
+                teacher_logits, student_logits, method_specific_loss = self.model(inputs, targets)
+            else:
+                teacher_logits, student_logits, method_specific_loss = self.model(inputs)
+            
+            # Compute losses (now passing inputs as well)
+            total_loss, losses_dict = self._compute_losses(
+                teacher_logits, student_logits, targets, method_specific_loss, inputs
+            )
+            
+            total_loss.backward()
+            self.student_optimizer.step()
+            
+            # Update meters
+            self._update_meters(meters, losses_dict, student_logits, targets, inputs.size(0))
+            
+            # Update progress bar
+            if batch_idx % max(1, self.args.print_freq // 10) == 0:
+                self._update_progress_bar(progress_bar, meters)
+        
+        progress_bar.close()
+        return self._get_average_losses(meters)
+
+    def _train_epoch_adversarial(self, train_loader, epoch):
+        """Train for one epoch (adversarial methods: DisDKD)."""
+        self.model.train()
+        meters = self._init_meters(adversarial=True)
+        
+        progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} Train ({self.args.method})", leave=False)
+        
+        for batch_idx, batch_data in enumerate(progress_bar):
+            inputs, targets = batch_data
+            inputs, targets = inputs.to(self.device), targets.to(self.device)
+            
+            # Step 1: Train Discriminator
+            self.model.set_training_mode('discriminator')
+            self.discriminator_optimizer.zero_grad()
+            
+            result = self.model(inputs, targets)
+            disc_loss = result['total_disc_loss']
+            
+            disc_loss.backward()
+            self.discriminator_optimizer.step()
+            
+            # Step 2: Train Student
+            self.model.set_training_mode('student')
+            self.student_optimizer.zero_grad()
+            
+            result = self.model(inputs, targets)
+            teacher_logits = result['teacher_logits']
+            student_logits = result['student_logits']
+            
+            # Compute standard losses
+            ce_loss = self.criterion(student_logits, targets)
+            kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
+            
+            # Weighted losses
+            weighted_ce = self.args.alpha * ce_loss
+            weighted_kd = self.args.beta * kd_loss
+            student_loss = result['total_student_loss']
+            
+            # For DisDKD, also add the DKD loss
+            if self.args.method == 'DisDKD':
+                dkd_loss = result.get('method_specific_loss', 0)
+                if isinstance(dkd_loss, torch.Tensor):
+                    total_loss = weighted_ce + weighted_kd + self.args.disdkd_adversarial_weight * student_loss + dkd_loss
+                else:
+                    total_loss = weighted_ce + weighted_kd + self.args.disdkd_adversarial_weight * student_loss
+            else:
+                total_loss = weighted_ce + weighted_kd + self.args.gamma * student_loss
+            
+            total_loss.backward()
+            self.student_optimizer.step()
+            
+            # Update meters
+            self._update_adversarial_meters(meters, result, ce_loss, kd_loss, 
+                                        total_loss, student_logits, targets, inputs.size(0))
+            
+            # Update progress bar
+            if batch_idx % max(1, self.args.print_freq // 10) == 0:
+                self._update_adversarial_progress_bar(progress_bar, meters)
+        
+        progress_bar.close()
+        return self._get_average_losses(meters)
+
+    def _validate(self, val_loader, epoch=None):
+        """Validate the model."""
+        self.model.eval()
+        
+        losses = AverageMeter()
+        top1 = AverageMeter()
+        
+        desc = f"Epoch {epoch} Val" if epoch is not None else "Validation"
+        progress_bar = tqdm(val_loader, desc=desc, leave=False)
+        
+        with torch.no_grad():
+            for inputs, targets in progress_bar:
+                inputs, targets = inputs.to(self.device), targets.to(self.device)
+                
+                # Forward pass
+                if self.args.method in ['DisDKD']:
+                    self.model.set_training_mode('student')
+                    result = self.model(inputs, targets)
+                    student_logits = result['student_logits']
+                elif self.args.method in ['DKD']:
+                    _, student_logits, _ = self.model(inputs, targets)
+                else:
+                    _, student_logits, _ = self.model(inputs)
+                
+                loss = self.criterion(student_logits, targets)
+                acc1 = accuracy(student_logits, targets, topk=(1,))[0]
+                
+                losses.update(loss.item(), inputs.size(0))
+                top1.update(acc1.item(), inputs.size(0))
+                
+                progress_bar.set_postfix({
+                    'val_loss': f'{losses.avg:.4f}',
+                    'val_acc': f'{top1.avg:.2f}%'
+                })
+        
+        progress_bar.close()
+        return {'total': losses.avg}, top1.avg
+
+    def _compute_kd_loss(self, teacher_logits, student_logits):
+        """Compute knowledge distillation loss."""
+        if teacher_logits is None:
+            return torch.tensor(0.0, device=student_logits.device)
+        
+        T = self.args.tau
+        return nn.KLDivLoss(reduction='batchmean')(
+            nn.functional.log_softmax(student_logits / T, dim=1),
+            nn.functional.softmax(teacher_logits / T, dim=1)
+        ) * (T * T)
+
+    def _compute_losses(self, teacher_logits, student_logits, targets, method_specific_loss, inputs=None):
+        """Compute all losses for standard training."""
+        ce_loss = self.criterion(student_logits, targets)
+        
+        # For DKD and FeatDKD, the method_specific_loss already contains the full distillation loss
+        if self.args.method in ['DKD']:
+            kd_loss = torch.tensor(0.0, device=student_logits.device)
+        else:
+            kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
+        
+        # Weighted losses
+        weighted_ce = self.args.alpha * ce_loss
+        weighted_kd = self.args.beta * kd_loss
+        total_loss = weighted_ce + weighted_kd
+        
+        losses_dict = {
+            'total': total_loss.item(),
+            'ce': ce_loss.item(),
+            'kd': kd_loss.item()
+        }
+        
+        # Handle method-specific losses
+        if method_specific_loss is not None:
+            if self.args.method in ['DKD']:
+                total_loss += method_specific_loss
+                
+                if self.args.method == 'DKD':
+                    # Compute TCKD and NCKD for logging
+                    tckd, nckd = self._compute_dkd_components(student_logits, teacher_logits, targets)
+                    losses_dict['tckd'] = tckd
+                    losses_dict['nckd'] = nckd
+        
+            else:
+                # Generic method loss (FitNet, CRD)
+                method_loss_value = method_specific_loss.item()
+                weighted_method = self.args.gamma * method_specific_loss
+                total_loss += weighted_method
+                
+                # Map to appropriate loss key
+                loss_key_map = {
+                    'FitNet': 'hint',
+                    'CRD': 'contrastive',
+                }
+                loss_key = loss_key_map.get(self.args.method, 'method_specific')
+                losses_dict[loss_key] = method_loss_value
+        
+        losses_dict['total'] = total_loss.item()
+        return total_loss, losses_dict
+
+    def _compute_dkd_components(self, student_logits, teacher_logits, targets):
+        """Compute TCKD and NCKD components for DKD logging."""
+        with torch.no_grad():
+            gt_mask = self.model._get_gt_mask(student_logits, targets)
+            other_mask = self.model._get_other_mask(student_logits, targets)
+            
+            pred_student = torch.nn.functional.softmax(student_logits / self.args.tau, dim=1)
+            pred_teacher = torch.nn.functional.softmax(teacher_logits / self.args.tau, dim=1)
+            
+            pred_student_tckd = self.model._cat_mask(pred_student, gt_mask, other_mask)
+            pred_teacher_tckd = self.model._cat_mask(pred_teacher, gt_mask, other_mask)
+            log_pred_student_tckd = torch.log(pred_student_tckd)
+            
+            tckd_loss = (
+                torch.nn.functional.kl_div(log_pred_student_tckd, pred_teacher_tckd, reduction='sum')
+                * (self.args.tau ** 2) / targets.shape[0]
+            ).item()
+            
+            pred_teacher_nckd = torch.nn.functional.softmax(
+                teacher_logits / self.args.tau - 1000.0 * gt_mask, dim=1
+            )
+            log_pred_student_nckd = torch.nn.functional.log_softmax(
+                student_logits / self.args.tau - 1000.0 * gt_mask, dim=1
+            )
+            
+            nckd_loss = (
+                torch.nn.functional.kl_div(log_pred_student_nckd, pred_teacher_nckd, reduction='sum')
+                * (self.args.tau ** 2) / targets.shape[0]
+            ).item()
+        
+        return tckd_loss, nckd_loss
+
+    def _init_meters(self, adversarial=False):
+        """Initialize loss meters."""
+        meters = {
+            'total': AverageMeter(), 'ce': AverageMeter(), 'kd': AverageMeter(),
+            'accuracy': AverageMeter()
+        }
+        
+        if adversarial:
+            meters.update({
+                'discriminator': AverageMeter(),
+                'adversarial': AverageMeter()
+            })
+            if self.args.method == 'DisDKD':
+                meters['dkd'] = AverageMeter()
+        else:
+            # Method-specific meters
+            method_meters = {
+                'FitNet': ['hint'],
+                'CRD': ['contrastive'],
+                'DKD': ['tckd', 'nckd'],
+            }
+            
+            if self.args.method in method_meters:
+                for meter_name in method_meters[self.args.method]:
+                    meters[meter_name] = AverageMeter()
+        
+        return meters
+
+    def _update_meters(self, meters, losses_dict, student_logits, targets, batch_size):
+        """Update meters with current batch losses."""
+        acc1 = accuracy(student_logits, targets, topk=(1,))[0]
+        
+        for key, value in losses_dict.items():
+            if key in meters:
+                meters[key].update(value, batch_size)
+        
+        meters['accuracy'].update(acc1.item(), batch_size)
+
+    def _update_adversarial_meters(self, meters, result, ce_loss, kd_loss, 
+                                total_loss, student_logits, targets, batch_size):
+        """Update meters for adversarial training."""
+        acc1 = accuracy(student_logits, targets, topk=(1,))[0]
+        
+        meters['total'].update(total_loss.item(), batch_size)
+        meters['ce'].update(ce_loss.item(), batch_size)
+        meters['kd'].update(kd_loss.item(), batch_size)
+        meters['accuracy'].update(acc1.item(), batch_size)
+        meters['discriminator'].update(result.get('discriminator_loss', 0), batch_size)
+        meters['adversarial'].update(result.get('adversarial_loss', 0), batch_size)
+
+        if self.args.method == 'DisDKD':
+            dkd_value = result.get('dkd_loss', 0)
+            if isinstance(dkd_value, torch.Tensor):
+                dkd_value = dkd_value.item()
+            meters['dkd'].update(dkd_value, batch_size)
+
+    def _update_progress_bar(self, progress_bar, meters):
+        """Update progress bar with current metrics."""
+        postfix = {
+            'loss': f'{meters["total"].avg:.4f}',
+            'ce': f'{meters["ce"].avg:.4f}',
+            'kd': f'{meters["kd"].avg:.4f}',
+            'acc': f'{meters["accuracy"].avg:.2f}%'
+        }
+        
+        # Add method-specific metrics to progress bar
+        if self.args.method == 'DKD' and 'tckd' in meters:
+            postfix['tckd'] = f'{meters["tckd"].avg:.4f}'
+            postfix['nckd'] = f'{meters["nckd"].avg:.4f}'
+        
+        progress_bar.set_postfix(postfix)
+
+    def _update_adversarial_progress_bar(self, progress_bar, meters):
+        """Update progress bar for adversarial methods."""
+        postfix = {
+            'loss': f'{meters["total"].avg:.4f}',
+            'ce': f'{meters["ce"].avg:.4f}',
+            'disc': f'{meters["discriminator"].avg:.4f}',
+            'adv': f'{meters["adversarial"].avg:.4f}',
+            'acc': f'{meters["accuracy"].avg:.2f}%'
+        }
+        
+        # Add method-specific metrics
+        if self.args.method == 'DisDKD' and 'dkd' in meters:
+            postfix['dkd'] = f'{meters["dkd"].avg:.4f}'
+        
+        progress_bar.set_postfix(postfix)
+
+    def _get_average_losses(self, meters):
+        """Get average losses from meters."""
+        losses = {key: meter.avg for key, meter in meters.items() if key != 'accuracy'}
+        accuracy_val = meters['accuracy'].avg
+        return losses, accuracy_val
