@@ -80,7 +80,7 @@ class DKD(nn.Module):
         log_pred_student_tckd = torch.log(pred_student_tckd)
         
         tckd_loss = (
-            F.kl_div(log_pred_student_tckd, pred_teacher_tckd, reduction='sum')
+            F.kl_div(log_pred_student_tckd, pred_teacher_tckd, reduction='batchmean')
             * (self.temperature ** 2)
             / target.shape[0]
         )
@@ -95,7 +95,7 @@ class DKD(nn.Module):
         )
         
         nckd_loss = (
-            F.kl_div(log_pred_student_nckd, pred_teacher_nckd, reduction='sum')
+            F.kl_div(log_pred_student_nckd, pred_teacher_nckd, reduction='batchmean')
             * (self.temperature ** 2)
             / target.shape[0]
         )
