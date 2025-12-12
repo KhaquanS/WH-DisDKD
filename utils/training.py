@@ -204,8 +204,8 @@ class Trainer:
             self.model.set_training_mode("discriminator")
             self.discriminator_optimizer.zero_grad()
 
-            result = self.model(inputs, targets)
-            disc_loss = result["total_disc_loss"]
+            disc_result = self.model(inputs, targets)
+            disc_loss = disc_result["total_disc_loss"]
 
             disc_loss.backward()
             self.discriminator_optimizer.step()
@@ -214,9 +214,9 @@ class Trainer:
             self.model.set_training_mode("student")
             self.student_optimizer.zero_grad()
 
-            result = self.model(inputs, targets)
-            teacher_logits = result["teacher_logits"]
-            student_logits = result["student_logits"]
+            student_result = self.model(inputs, targets)
+            teacher_logits = student_result["teacher_logits"]
+            student_logits = student_result["student_logits"]
 
             # Compute standard losses
             ce_loss = self.criterion(student_logits, targets)
@@ -225,11 +225,11 @@ class Trainer:
             # Weighted losses
             weighted_ce = self.args.alpha * ce_loss
             weighted_kd = self.args.beta * kd_loss
-            student_loss = result["total_student_loss"]
+            student_loss = student_result["total_student_loss"]
 
             # For DisDKD, also add the DKD loss
             if self.args.method == "DisDKD":
-                dkd_loss = result.get("method_specific_loss", 0)
+                dkd_loss = student_result.get("method_specific_loss", 0)
                 if isinstance(dkd_loss, torch.Tensor):
                     total_loss = (
                         weighted_ce
@@ -249,10 +249,11 @@ class Trainer:
             total_loss.backward()
             self.student_optimizer.step()
 
-            # Update meters
+            # Update meters - combine metrics from both phases
             self._update_adversarial_meters(
                 meters,
-                result,
+                disc_result,
+                student_result,
                 ce_loss,
                 kd_loss,
                 total_loss,
@@ -458,7 +459,8 @@ class Trainer:
     def _update_adversarial_meters(
         self,
         meters,
-        result,
+        disc_result,
+        student_result,
         ce_loss,
         kd_loss,
         total_loss,
@@ -473,17 +475,23 @@ class Trainer:
         meters["ce"].update(ce_loss.item(), batch_size)
         meters["kd"].update(kd_loss.item(), batch_size)
         meters["accuracy"].update(acc1.item(), batch_size)
-        meters["discriminator"].update(result.get("discriminator_loss", 0), batch_size)
-        meters["adversarial"].update(result.get("adversarial_loss", 0), batch_size)
 
-        # Add discriminator accuracy and fool rate tracking
-        meters["disc_accuracy"].update(
-            result.get("discriminator_accuracy", 0), batch_size
+        # Get discriminator metrics from disc_result
+        meters["discriminator"].update(
+            disc_result.get("discriminator_loss", 0), batch_size
         )
-        meters["fool_rate"].update(result.get("fool_rate", 0), batch_size)
+        meters["disc_accuracy"].update(
+            disc_result.get("discriminator_accuracy", 0), batch_size
+        )
+
+        # Get student adversarial metrics from student_result
+        meters["adversarial"].update(
+            student_result.get("adversarial_loss", 0), batch_size
+        )
+        meters["fool_rate"].update(student_result.get("fool_rate", 0), batch_size)
 
         if self.args.method == "DisDKD":
-            dkd_value = result.get("dkd_loss", 0)
+            dkd_value = student_result.get("dkd_loss", 0)
             if isinstance(dkd_value, torch.Tensor):
                 dkd_value = dkd_value.item()
             meters["dkd"].update(dkd_value, batch_size)
