@@ -103,11 +103,25 @@ class Trainer:
 
             self.student_scheduler.step()
 
-            # Print epoch summary
+            # Print epoch summary with enhanced metrics for DisDKD
             elapsed = time.time() - start_time
-            print(
-                f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}%, Time {elapsed:.1f}s"
-            )
+
+            if self.args.method == "DisDKD":
+                disc_acc = train_losses.get("disc_accuracy", 0) * 100
+                fool_rate = train_losses.get("fool_rate", 0) * 100
+                dkd_loss = train_losses.get("dkd", 0)
+                disc_loss = train_losses.get("discriminator", 0)
+                adv_loss = train_losses.get("adversarial", 0)
+                print(
+                    f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}% | "
+                    f"Disc_Acc: {disc_acc:.1f}%, Fool: {fool_rate:.1f}% | "
+                    f"DKD: {dkd_loss:.4f}, Disc: {disc_loss:.4f}, Adv: {adv_loss:.4f} | "
+                    f"Time: {elapsed:.1f}s"
+                )
+            else:
+                print(
+                    f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}%, Time {elapsed:.1f}s"
+                )
 
             # Save best model
             if val_acc > best_acc:
