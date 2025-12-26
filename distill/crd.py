@@ -317,6 +317,18 @@ class CRD(nn.Module):
         teacher_proj = self.teacher_projector(teacher_feat)
         student_proj = self.student_projector(student_feat)
 
+        # prevent using stale sample_indices across phases/batches ----
+        if self.sample_indices is not None and self.sample_indices.numel() != x.size(0):
+            # In eval, indices typically aren't set; if leftover from training, drop them.
+            if not self.training:
+                self.sample_indices = None
+            else:
+                # In training, mismatch means your train loader / unpacking is wrong.
+                raise RuntimeError(
+                    f"CRD: stale/incorrect sample_indices length {self.sample_indices.numel()} "
+                    f"!= batch size {x.size(0)}"
+                )
+
         if self.sample_indices is None:
             if self.training:
                 raise RuntimeError("CRD: sample_indices not set. Train loader must return (x,y,idx).")

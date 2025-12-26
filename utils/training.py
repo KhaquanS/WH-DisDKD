@@ -337,6 +337,9 @@ class Trainer:
         """Validate the model."""
         self.model.eval()
 
+        if hasattr(self.model, "set_sample_indices"):
+            self.model.set_sample_indices(None)
+
         meters = self._init_meters(
             adversarial=False
         )  # includes method meter for CRD :contentReference[oaicite:8]{index=8}
