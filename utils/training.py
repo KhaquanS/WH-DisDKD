@@ -38,8 +38,24 @@ class Trainer:
         """Setup optimizer(s) and scheduler(s)."""
         args = self.args
 
-        # Methods with discriminator need separate optimizers
-        if args.method in ["DisDKD"]:
+        # --- CONTRA-DKD LOGIC ---
+        if args.method == "ContraDKD":
+            # ContraDKD provides its own split optimizers to ensure
+            # Student optimizer doesn't touch Discriminator params and vice-versa.
+            self.student_optimizer, self.discriminator_optimizer = (
+                self.model.get_optimizers(
+                    student_lr=args.lr,
+                    discriminator_lr=args.discriminator_lr,
+                    weight_decay=args.weight_decay,
+                )
+            )
+            # Setup scheduler only for Student
+            self.student_scheduler = StepLR(
+                self.student_optimizer, step_size=args.step_size, gamma=args.lr_decay
+            )
+
+        # --- DISDKD LOGIC ---
+        elif args.method in ["DisDKD"]:
             self.student_optimizer, self.student_scheduler = self._create_optimizer(
                 self.model
             )
@@ -54,6 +70,8 @@ class Trainer:
             else:
                 self.discriminator_optimizer = None
                 print(f"Warning: {args.method} selected but no discriminator found.")
+
+        # --- STANDARD LOGIC ---
         else:
             self.student_optimizer, self.student_scheduler = self._create_optimizer(
                 self.model
@@ -183,14 +201,14 @@ class Trainer:
                         f"DKD: {dkd_loss:.4f}, Disc: {disc_loss:.4f}, Adv: {adv_loss:.4f} | "
                         f"Time: {elapsed:.1f}s"
                     )
-                
+
             elif self.args.method == "ContraDKD":
                 # --- ADD THIS BLOCK ---
                 disc_acc = train_losses.get("disc_accuracy", 0) * 100
                 fool_rate = train_losses.get("fool_rate", 0) * 100
                 l2c_t = train_losses.get("l2c_teacher", 0)
                 l2c_s = train_losses.get("l2c_student", 0)
-                
+
                 print(
                     f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}% | "
                     f"D_Acc: {disc_acc:.1f}%, Fool: {fool_rate:.1f}% | "
