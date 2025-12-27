@@ -282,7 +282,12 @@ class Trainer:
 
             # Compute standard losses
             ce_loss = self.criterion(student_logits, targets)
-            kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
+
+            # DisDKD already computes its own KD loss. Force standard KD to 0.
+            if self.args.method == "DisDKD":
+                kd_loss = torch.tensor(0.0, device=self.device)
+            else:
+                kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
 
             # Weighted losses
             weighted_ce = self.args.alpha * ce_loss

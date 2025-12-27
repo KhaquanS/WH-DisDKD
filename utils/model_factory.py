@@ -31,16 +31,16 @@ def create_distillation_model(args, teacher, student, num_classes: int):
         "LogitKD": lambda: LogitKD(teacher, student),
         "DKD": lambda: DKD(teacher, student, args.dkd_alpha, args.dkd_beta, args.tau),
         "DisDKD": lambda: DisDKD(
-            teacher,
-            student,
-            args.teacher_layer,
-            args.student_layer,
-            teacher_channels,
-            student_channels,
-            args.hidden_channels,
-            args.dkd_alpha,
-            args.dkd_beta,
-            args.tau,
+            teacher=teacher,
+            student=student,
+            teacher_layer=args.teacher_layer,
+            student_layer=args.student_layer,
+            teacher_channels=teacher_channels,
+            student_channels=student_channels,
+            hidden_channels=args.hidden_channels,
+            alpha=args.dkd_alpha,  # Explicitly map TCKD weight
+            beta=args.dkd_beta,  # Explicitly map NCKD weight
+            temperature=args.tau,
         ),
         "FitNet": lambda: FitNet(
             teacher,

@@ -219,25 +219,25 @@ class DisDKD(nn.Module):
             for param in self.teacher_regressor.parameters():
                 param.requires_grad = False
 
-    def match_spatial_dimensions(self, student_feat, teacher_feat):
-        """
-        Match spatial dimensions of student features to teacher features via interpolation.
+    # def match_spatial_dimensions(self, student_feat, teacher_feat):
+    #     """
+    #     Match spatial dimensions of student features to teacher features via interpolation.
 
-        Args:
-            student_feat (Tensor): Student features
-            teacher_feat (Tensor): Teacher features
+    #     Args:
+    #         student_feat (Tensor): Student features
+    #         teacher_feat (Tensor): Teacher features
 
-        Returns:
-            Tensor: Student features with matched spatial dimensions
-        """
-        if student_feat.shape[2:] != teacher_feat.shape[2:]:
-            student_feat = F.interpolate(
-                student_feat,
-                size=teacher_feat.shape[2:],
-                mode="bilinear",
-                align_corners=False,
-            )
-        return student_feat
+    #     Returns:
+    #         Tensor: Student features with matched spatial dimensions
+    #     """
+    #     if student_feat.shape[2:] != teacher_feat.shape[2:]:
+    #         student_feat = F.interpolate(
+    #             student_feat,
+    #             size=teacher_feat.shape[2:],
+    #             mode="bilinear",
+    #             align_corners=False,
+    #         )
+    #     return student_feat
 
     def compute_dkd_loss(self, logits_student, logits_teacher, target):
         """
@@ -266,7 +266,6 @@ class DisDKD(nn.Module):
         tckd_loss = (
             F.kl_div(log_pred_student_tckd, pred_teacher_tckd, reduction="batchmean")
             * (self.temperature**2)
-            / target.shape[0]
         )
 
         # Non-Target Class Knowledge Distillation (NCKD)
@@ -280,7 +279,6 @@ class DisDKD(nn.Module):
         nckd_loss = (
             F.kl_div(log_pred_student_nckd, pred_teacher_nckd, reduction="batchmean")
             * (self.temperature**2)
-            / target.shape[0]
         )
 
         # Combined DKD loss
@@ -337,7 +335,7 @@ class DisDKD(nn.Module):
         student_hidden = self.student_regressor(student_feat)
 
         # Match spatial dimensions
-        student_hidden = self.match_spatial_dimensions(student_hidden, teacher_hidden)
+        # student_hidden = self.match_spatial_dimensions(student_hidden, teacher_hidden)
 
         result = {"teacher_logits": teacher_logits, "student_logits": student_logits}
 
