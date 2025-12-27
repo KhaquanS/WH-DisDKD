@@ -40,8 +40,6 @@ class Trainer:
 
         # --- CONTRA-DKD LOGIC ---
         if args.method == "ContraDKD":
-            # ContraDKD provides its own split optimizers to ensure
-            # Student optimizer doesn't touch Discriminator params and vice-versa.
             self.student_optimizer, self.discriminator_optimizer = (
                 self.model.get_optimizers(
                     student_lr=args.lr,
@@ -49,7 +47,6 @@ class Trainer:
                     weight_decay=args.weight_decay,
                 )
             )
-            # Setup scheduler only for Student
             self.student_scheduler = StepLR(
                 self.student_optimizer, step_size=args.step_size, gamma=args.lr_decay
             )
@@ -95,42 +92,6 @@ class Trainer:
 
         return optimizer, scheduler
 
-    # def train(self, train_loader, val_loader):
-    #     """Main training loop."""
-    #     print(f"\nStarting training for {self.args.epochs} epochs...")
-    #     best_acc = 0.0
-
-    #     for epoch in range(self.args.epochs):
-    #         start_time = time.time()
-
-    #         # Train and validate
-    #         if self.args.method in ['DisDKD']:
-    #             train_losses, train_acc = self._train_epoch_adversarial(train_loader, epoch)
-    #         else:
-    #             train_losses, train_acc = self._train_epoch_standard(train_loader, epoch)
-
-    #         val_losses, val_acc = self._validate(val_loader, epoch)
-
-    #         # Log losses
-    #         self.loss_tracker.log_epoch(epoch, 'train', train_losses, train_acc)
-    #         self.loss_tracker.log_epoch(epoch, 'val', val_losses, val_acc)
-
-    #         self.student_scheduler.step()
-
-    #         # Print epoch summary
-    #         elapsed = time.time() - start_time
-    #         print(f'Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}%, Time {elapsed:.1f}s')
-
-    #         # Save best model
-    #         if val_acc > best_acc:
-    #             best_acc = val_acc
-    #             save_checkpoint(self.model, self.student_optimizer, epoch, val_acc,
-    #                         self.args, is_best=True)
-
-    #         print('-' * 80)
-
-    #     return best_acc
-
     def train(self, train_loader, val_loader):
         """Main training loop with FitNet 2-Stage Logic."""
         print(f"\nStarting training for {self.args.epochs} epochs...")
@@ -140,8 +101,7 @@ class Trainer:
 
         best_acc = 0.0
 
-        # --- FROM YOUR COMMIT: 2-STAGE LOGIC START ---
-        # Store original weights so we can restore them in Stage 2
+        # Store original weights for FitNet stage switching
         original_alpha = self.args.alpha
         original_beta = self.args.beta
         original_gamma = self.args.gamma
@@ -150,32 +110,29 @@ class Trainer:
             start_time = time.time()
 
             # --- FITNET STAGE SWITCHING LOGIC ---
-            if self.args.method == 'FitNet' and self.args.fitnet_stage1_epochs > 0:
+            if self.args.method == "FitNet" and self.args.fitnet_stage1_epochs > 0:
                 if epoch < self.args.fitnet_stage1_epochs:
-                    # STAGE 1: HINT ONLY
                     self.args.alpha = 0.0
                     self.args.beta = 0.0
                     self.args.gamma = original_gamma
                     stage_name = "Stage 1 (Hint Only)"
                 else:
-                    # STAGE 2: DISTILLATION ONLY
                     self.args.alpha = original_alpha
                     self.args.beta = original_beta
                     self.args.gamma = 0.0
                     stage_name = "Stage 2 (Task)"
             else:
                 stage_name = "Standard"
-            # ------------------------------------
 
             # Train and validate
             if self.args.method in ["DisDKD", "ContraDKD"]:
                 train_losses, train_acc = self._train_epoch_adversarial(
-                        train_loader, epoch
-                    )
+                    train_loader, epoch
+                )
             else:
                 train_losses, train_acc = self._train_epoch_standard(
-                        train_loader, epoch
-                    )
+                    train_loader, epoch
+                )
 
             val_losses, val_acc = self._validate(val_loader, epoch)
 
@@ -189,49 +146,48 @@ class Trainer:
             elapsed = time.time() - start_time
 
             if self.args.method == "DisDKD":
-                # Use the advanced metrics (from your team's update)
                 disc_acc = train_losses.get("disc_accuracy", 0) * 100
                 fool_rate = train_losses.get("fool_rate", 0) * 100
                 dkd_loss = train_losses.get("dkd", 0)
                 disc_loss = train_losses.get("discriminator", 0)
                 adv_loss = train_losses.get("adversarial", 0)
                 print(
-                        f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}% | "
-                        f"Disc_Acc: {disc_acc:.1f}%, Fool: {fool_rate:.1f}% | "
-                        f"DKD: {dkd_loss:.4f}, Disc: {disc_loss:.4f}, Adv: {adv_loss:.4f} | "
-                        f"Time: {elapsed:.1f}s"
-                    )
+                    f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}% | "
+                    f"Disc_Acc: {disc_acc:.1f}%, Fool: {fool_rate:.1f}% | "
+                    f"DKD: {dkd_loss:.4f}, Disc: {disc_loss:.4f}, Adv: {adv_loss:.4f} | "
+                    f"Time: {elapsed:.1f}s"
+                )
 
             elif self.args.method == "ContraDKD":
-                # --- ADD THIS BLOCK ---
                 disc_acc = train_losses.get("disc_accuracy", 0) * 100
                 fool_rate = train_losses.get("fool_rate", 0) * 100
-                l2c_t = train_losses.get("l2c_teacher", 0)
+                dkd_loss = train_losses.get("dkd", 0)
                 l2c_s = train_losses.get("l2c_student", 0)
+                disc_loss = train_losses.get("discriminator", 0)
+                adv_loss = train_losses.get("adversarial", 0)
 
                 print(
                     f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}% | "
                     f"D_Acc: {disc_acc:.1f}%, Fool: {fool_rate:.1f}% | "
-                    f"L2C(T): {l2c_t:.4f}, L2C(S): {l2c_s:.4f} | "
+                    f"DKD: {dkd_loss:.4f}, L2C(S): {l2c_s:.4f}, Disc: {disc_loss:.4f}, Adv: {adv_loss:.4f} | "
                     f"Time: {elapsed:.1f}s"
                 )
             else:
-                # Use your stage_name logging (for FitNet/others)
                 print(
-                        f"Epoch {epoch} [{stage_name}]: Train {train_acc:.2f}%, Val {val_acc:.2f}%, Time {elapsed:.1f}s"
-                    )
+                    f"Epoch {epoch} [{stage_name}]: Train {train_acc:.2f}%, Val {val_acc:.2f}%, Time {elapsed:.1f}s"
+                )
 
             # Save best model
             if val_acc > best_acc:
                 best_acc = val_acc
                 save_checkpoint(
-                        self.model,
-                        self.student_optimizer,
-                        epoch,
-                        val_acc,
-                        self.args,
-                        is_best=True,
-                    )
+                    self.model,
+                    self.student_optimizer,
+                    epoch,
+                    val_acc,
+                    self.args,
+                    is_best=True,
+                )
 
             print("-" * 80)
 
@@ -245,7 +201,6 @@ class Trainer:
         progress_bar = tqdm(train_loader, desc=f"Epoch {epoch} Train", leave=False)
 
         for batch_idx, batch_data in enumerate(progress_bar):
-            # Handle different data formats
             if self.args.method == "CRD":
                 inputs, targets, indices = batch_data
                 self.model.set_sample_indices(indices)
@@ -265,7 +220,7 @@ class Trainer:
                     inputs
                 )
 
-            # Compute losses (now passing inputs as well)
+            # Compute losses
             total_loss, losses_dict = self._compute_losses(
                 teacher_logits, student_logits, targets, method_specific_loss, inputs
             )
@@ -286,7 +241,7 @@ class Trainer:
         return self._get_average_losses(meters), meters["accuracy"].avg
 
     def _train_epoch_adversarial(self, train_loader, epoch):
-        """Train for one epoch (adversarial methods: DisDKD)."""
+        """Train for one epoch (adversarial methods: DisDKD, ContraDKD)."""
         self.model.train()
         meters = self._init_meters(adversarial=True)
 
@@ -319,35 +274,44 @@ class Trainer:
             # Compute standard losses
             ce_loss = self.criterion(student_logits, targets)
 
-            # DisDKD already computes its own KD loss. Force standard KD to 0.
+            # CRITICAL: Handle different loss structures
             if self.args.method == "DisDKD":
+                # DisDKD separates DKD and adversarial losses
+                # method_specific_loss = DKD only
+                # total_student_loss = adversarial only
                 kd_loss = torch.tensor(0.0, device=self.device)
-            else:
-                kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
-
-            # Weighted losses
-            weighted_ce = self.args.alpha * ce_loss
-            weighted_kd = self.args.beta * kd_loss
-            student_loss = student_result["total_student_loss"]
-
-            # For DisDKD, also add the DKD loss
-            if self.args.method == "DisDKD":
                 dkd_loss = student_result.get("method_specific_loss", 0)
+                student_adv_loss = student_result["total_student_loss"]
+
                 if isinstance(dkd_loss, torch.Tensor):
                     total_loss = (
-                        weighted_ce
-                        + weighted_kd
-                        + self.args.disdkd_adversarial_weight * student_loss
-                        + dkd_loss
+                        self.args.alpha * ce_loss
+                        + dkd_loss  # DKD loss
+                        + self.args.disdkd_adversarial_weight
+                        * student_adv_loss  # Adversarial
                     )
                 else:
                     total_loss = (
-                        weighted_ce
-                        + weighted_kd
-                        + self.args.disdkd_adversarial_weight * student_loss
+                        self.args.alpha * ce_loss
+                        + self.args.disdkd_adversarial_weight * student_adv_loss
                     )
+
+            elif self.args.method == "ContraDKD":
+                # ContraDKD combines everything in method_specific_loss
+                # method_specific_loss = DKD + Adversarial + L2C
+                kd_loss = torch.tensor(0.0, device=self.device)
+                internal_loss = student_result["method_specific_loss"]
+                total_loss = self.args.alpha * ce_loss + internal_loss
+
             else:
-                total_loss = weighted_ce + weighted_kd + self.args.gamma * student_loss
+                # Fallback for any future adversarial methods
+                kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
+                student_loss = student_result["total_student_loss"]
+                total_loss = (
+                    self.args.alpha * ce_loss
+                    + self.args.beta * kd_loss
+                    + self.args.gamma * student_loss
+                )
 
             total_loss.backward()
             self.student_optimizer.step()
@@ -379,16 +343,13 @@ class Trainer:
         if hasattr(self.model, "set_sample_indices"):
             self.model.set_sample_indices(None)
 
-        meters = self._init_meters(
-            adversarial=False
-        )  # includes method meter for CRD :contentReference[oaicite:8]{index=8}
+        meters = self._init_meters(adversarial=False)
 
         desc = f"Epoch {epoch} Val" if epoch is not None else "Validation"
         progress_bar = tqdm(val_loader, desc=desc, leave=False)
 
         with torch.no_grad():
             for batch in progress_bar:
-                # Support both (x,y) and (x,y,idx)
                 if len(batch) == 3:
                     inputs, targets, indices = batch
                     indices = indices.to(self.device)
@@ -398,12 +359,11 @@ class Trainer:
 
                 inputs, targets = inputs.to(self.device), targets.to(self.device)
 
-                # For CRD: pass indices to the model
                 if self.args.method == "CRD" and indices is not None:
                     self.model.set_sample_indices(indices)
 
-                # Forward (match your training signatures)
-                if self.args.method in ["DisDKD"]:
+                # Handle ContraDKD same as DisDKD
+                if self.args.method in ["DisDKD", "ContraDKD"]:
                     self.model.set_training_mode("student")
                     result = self.model(inputs, targets)
                     teacher_logits = result.get("teacher_logits", None)
@@ -418,7 +378,7 @@ class Trainer:
                         inputs
                     )
 
-                # Compute loss components exactly like training
+                # Compute loss components
                 ce_loss = self.criterion(student_logits, targets)
                 kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
 
@@ -429,7 +389,7 @@ class Trainer:
                     "kd": kd_loss.item(),
                 }
 
-                # Method-specific (CRD/FitNet)
+                # Method-specific
                 if method_specific_loss is not None and self.args.method in [
                     "CRD",
                     "FitNet",
@@ -474,13 +434,11 @@ class Trainer:
         """Compute all losses for standard training."""
         ce_loss = self.criterion(student_logits, targets)
 
-        # For DKD and FeatDKD, the method_specific_loss already contains the full distillation loss
         if self.args.method in ["DKD"]:
             kd_loss = torch.tensor(0.0, device=student_logits.device)
         else:
             kd_loss = self._compute_kd_loss(teacher_logits, student_logits)
 
-        # Weighted losses
         weighted_ce = self.args.alpha * ce_loss
         weighted_kd = self.args.beta * kd_loss
         total_loss = weighted_ce + weighted_kd
@@ -497,7 +455,6 @@ class Trainer:
                 total_loss += method_specific_loss
 
                 if self.args.method == "DKD":
-                    # Compute TCKD and NCKD for logging
                     tckd, nckd = self._compute_dkd_components(
                         student_logits, teacher_logits, targets
                     )
@@ -505,12 +462,10 @@ class Trainer:
                     losses_dict["nckd"] = nckd
 
             else:
-                # Generic method loss (FitNet, CRD)
                 method_loss_value = method_specific_loss.item()
                 weighted_method = self.args.gamma * method_specific_loss
                 total_loss += weighted_method
 
-                # Map to appropriate loss key
                 loss_key_map = {
                     "FitNet": "hint",
                     "CRD": "contrastive",
@@ -581,10 +536,14 @@ class Trainer:
                     "fool_rate": AverageMeter(),
                 }
             )
+            # Add method-specific meters for adversarial methods
             if self.args.method == "DisDKD":
                 meters["dkd"] = AverageMeter()
+            elif self.args.method == "ContraDKD":
+                meters["dkd"] = AverageMeter()
+                meters["l2c_student"] = AverageMeter()
         else:
-            # Method-specific meters
+            # Method-specific meters for standard training
             method_meters = {
                 "FitNet": ["hint"],
                 "CRD": ["contrastive"],
@@ -627,7 +586,7 @@ class Trainer:
         meters["kd"].update(kd_loss.item(), batch_size)
         meters["accuracy"].update(acc1.item(), batch_size)
 
-        # Get discriminator metrics from disc_result
+        # Discriminator metrics
         meters["discriminator"].update(
             disc_result.get("discriminator_loss", 0), batch_size
         )
@@ -635,17 +594,28 @@ class Trainer:
             disc_result.get("discriminator_accuracy", 0), batch_size
         )
 
-        # Get student adversarial metrics from student_result
-        meters["adversarial"].update(
-            student_result.get("adversarial_loss", 0), batch_size
-        )
+        # Student adversarial metrics
+        meters["adversarial"].update(student_result.get("adversarial", 0), batch_size)
         meters["fool_rate"].update(student_result.get("fool_rate", 0), batch_size)
 
+        # Method-specific metrics
         if self.args.method == "DisDKD":
-            dkd_value = student_result.get("dkd_loss", 0)
+            dkd_value = student_result.get("dkd", 0)
             if isinstance(dkd_value, torch.Tensor):
                 dkd_value = dkd_value.item()
             meters["dkd"].update(dkd_value, batch_size)
+
+        elif self.args.method == "ContraDKD":
+            dkd_value = student_result.get("dkd", 0)
+            l2c_value = student_result.get("l2c_student", 0)
+
+            if isinstance(dkd_value, torch.Tensor):
+                dkd_value = dkd_value.item()
+            if isinstance(l2c_value, torch.Tensor):
+                l2c_value = l2c_value.item()
+
+            meters["dkd"].update(dkd_value, batch_size)
+            meters["l2c_student"].update(l2c_value, batch_size)
 
     def _update_progress_bar(self, progress_bar, meters):
         """Update progress bar with current metrics."""
@@ -656,7 +626,6 @@ class Trainer:
             "acc": f'{meters["accuracy"].avg:.2f}%',
         }
 
-        # Add method-specific metrics to progress bar
         if self.args.method == "DKD" and "tckd" in meters:
             postfix["tckd"] = f'{meters["tckd"].avg:.4f}'
             postfix["nckd"] = f'{meters["nckd"].avg:.4f}'
@@ -675,9 +644,14 @@ class Trainer:
             "fool": f'{meters["fool_rate"].avg:.2%}',
         }
 
-        # Add method-specific metrics
+        # Add method-specific progress info
         if self.args.method == "DisDKD" and "dkd" in meters:
             postfix["dkd"] = f'{meters["dkd"].avg:.4f}'
+        elif self.args.method == "ContraDKD":
+            if "dkd" in meters:
+                postfix["dkd"] = f'{meters["dkd"].avg:.4f}'
+            if "l2c_student" in meters:
+                postfix["l2c"] = f'{meters["l2c_student"].avg:.4f}'
 
         progress_bar.set_postfix(postfix)
 

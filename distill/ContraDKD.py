@@ -4,8 +4,6 @@ import torch.nn.functional as F
 from collections import OrderedDict
 from utils.utils import get_module, count_params
 
-# --- Helper Classes (Copied for self-containment) ---
-
 
 class FeatureHooks:
     def __init__(self, named_layers):
@@ -76,33 +74,40 @@ class L2CContrastiveLoss(nn.Module):
         super(L2CContrastiveLoss, self).__init__()
         self.num_classes = num_classes
         self.temperature = temperature
-        # Learnable Class Proxies
         self.class_embeddings = nn.Parameter(torch.randn(num_classes, feat_dim))
         nn.init.xavier_uniform_(self.class_embeddings)
 
-    def forward(self, features, labels):
-        # features: [B, Dim] (Normalized)
-        # labels: [B]
+    def forward(self, features, labels, network_features=None):
+        """
+        Compute L2C loss with both data-class and data-data contrastive terms.
 
-        # Normalize proxies
+        Args:
+            features: Query features [B, Dim] (normalized)
+            labels: Class labels [B]
+            network_features: Optional reference features for data-data contrast
+                             If None, uses features (self-contrastive)
+        """
+        if network_features is None:
+            network_features = features
+
+        # Normalize
+        features = F.normalize(features, dim=1)
+        network_features = F.normalize(network_features, dim=1)
         proxies = F.normalize(self.class_embeddings, dim=1)
 
         # 1. Positive Proxy Similarity: (x_i . c_yi)
-        # Gather the specific proxy for each label in the batch
         target_proxies = proxies[labels]
         proxy_sim = (features * target_proxies).sum(
             dim=1, keepdim=True
         ) / self.temperature
 
-        # 2. Batch Similarity Matrix: (x_i . x_j)
-        batch_sim = torch.mm(features, features.t()) / self.temperature
+        # 2. Batch Similarity Matrix: (x_i . x_k)
+        batch_sim = torch.mm(features, network_features.t()) / self.temperature
 
         # Masks
         labels_col = labels.unsqueeze(1)
         labels_row = labels.unsqueeze(0)
-        # Samples with same class (excluding self)
         same_class_mask = (labels_col == labels_row).float().fill_diagonal_(0)
-        # All other samples (excluding self)
         diff_mask = torch.ones_like(same_class_mask).fill_diagonal_(0)
 
         # L2C Numerator: exp(proxy) + sum(exp(same_class))
@@ -118,17 +123,12 @@ class L2CContrastiveLoss(nn.Module):
         return loss.mean()
 
 
-# --- Main Model ---
-
-
 class ContraDKD(nn.Module):
     """
-    Unified ContraDKD.
+    Unified ContraDKD with corrected training objectives.
 
-    A single-stage approach where the Student learns via:
-    1. DKD (Logits)
-    2. Adversarial Alignment (Fooling Discriminator)
-    3. Contrastive Alignment (L2C: Clustering features around class proxies)
+    Discriminator Phase: Train Disc + Teacher Regressor (adversarial only)
+    Student Phase: Train Student + Student Regressor (DKD + Adversarial + L2C)
     """
 
     def __init__(
@@ -141,11 +141,11 @@ class ContraDKD(nn.Module):
         student_channels,
         hidden_channels=256,
         num_classes=10,
-        alpha=1.0,  # DKD TCKD
-        beta=8.0,  # DKD NCKD
-        temperature=4.0,  # DKD Temp
-        l2c_weight=0.5,  # Weight for Contrastive Loss
-        adv_weight=0.1,  # Weight for Adversarial Loss
+        alpha=1.0,
+        beta=8.0,
+        temperature=4.0,
+        l2c_weight=0.5,
+        adv_weight=0.1,
     ):
         super(ContraDKD, self).__init__()
         self.teacher = teacher
@@ -153,7 +153,6 @@ class ContraDKD(nn.Module):
         self.num_classes = num_classes
         self.hidden_channels = hidden_channels
 
-        # Hyperparameters
         self.alpha = alpha
         self.beta = beta
         self.temperature = temperature
@@ -174,7 +173,7 @@ class ContraDKD(nn.Module):
             [(student_layer, get_module(self.student.model, student_layer))]
         )
 
-        # Projectors (1x1 Conv)
+        # Projectors
         self.teacher_regressor = FeatureRegressor(teacher_channels, hidden_channels)
         self.student_regressor = FeatureRegressor(student_channels, hidden_channels)
 
@@ -195,13 +194,9 @@ class ContraDKD(nn.Module):
         )
 
     def initialize_class_embeddings(self, dataloader, device="cuda"):
-        """
-        Initialize L2C class proxies using the Teacher's features.
-        This provides a stable target for the Student to align to.
-        """
+        """Initialize L2C class proxies using Teacher's features."""
         print("Initializing ContraDKD Proxies from Teacher...")
         self.teacher.eval()
-        # Ensure regressor is on device
         self.teacher_regressor.to(device)
         self.teacher_regressor.eval()
 
@@ -218,7 +213,6 @@ class ContraDKD(nn.Module):
                 _ = self.teacher(inputs)
                 t_feat = self.teacher_hooks.features.get(self.teacher_layer)
 
-                # Project -> Pool -> Normalize
                 t_proj = self.teacher_regressor(t_feat)
                 t_vec = F.adaptive_avg_pool2d(t_proj, 1).flatten(1)
                 t_vec = F.normalize(t_vec, dim=1)
@@ -228,9 +222,8 @@ class ContraDKD(nn.Module):
 
                 self.teacher_hooks.clear()
                 if i >= 50:
-                    break  # Use subset for speed
+                    break
 
-        # Average features per class to set proxies
         for c in range(self.num_classes):
             if len(class_feats[c]) > 0:
                 center = torch.stack(class_feats[c]).mean(dim=0)
@@ -241,44 +234,43 @@ class ContraDKD(nn.Module):
     def set_training_mode(self, mode):
         self.training_mode = mode
         if mode == "discriminator":
-            # Train Discriminator & Teacher Regressor & Proxies
-            # Freeze Student path
+            # CORRECTED: Discriminator trains with Teacher Regressor for adversarial game
             for p in self.student.parameters():
                 p.requires_grad = False
             for p in self.student_regressor.parameters():
                 p.requires_grad = False
 
-            # Unfreeze Disc path
             for p in self.discriminator.parameters():
                 p.requires_grad = True
             for p in self.teacher_regressor.parameters():
                 p.requires_grad = True
-            self.l2c_loss_mod.class_embeddings.requires_grad = True
+
+            # CORRECTED: Class embeddings only updated during student phase
+            self.l2c_loss_mod.class_embeddings.requires_grad = False
 
         else:  # Student Mode
-            # Train Student & Student Regressor
-            # Unfreeze Student path
             for p in self.student.parameters():
                 p.requires_grad = True
             for p in self.student_regressor.parameters():
                 p.requires_grad = True
 
-            # Freeze Disc path
             for p in self.discriminator.parameters():
                 p.requires_grad = False
             for p in self.teacher_regressor.parameters():
                 p.requires_grad = False
-            self.l2c_loss_mod.class_embeddings.requires_grad = False
+
+            # CORRECTED: Allow class embeddings to refine during student training
+            self.l2c_loss_mod.class_embeddings.requires_grad = True
 
     def forward(self, x, targets):
         batch_size = x.size(0)
 
-        # 1. Forward Pass
+        # Forward Pass
         with torch.no_grad():
             t_logits = self.teacher(x)
         s_logits = self.student(x)
 
-        # 2. Extract & Project Features
+        # Extract & Project Features
         t_feat = self.teacher_hooks.features.get(self.teacher_layer)
         s_feat = self.student_hooks.features.get(self.student_layer)
 
@@ -288,21 +280,16 @@ class ContraDKD(nn.Module):
         t_proj = self.teacher_regressor(t_feat)
         s_proj = self.student_regressor(s_feat)
 
-        # 3. Prepare Vectors for L2C (Pool -> Flatten -> Normalize)
+        # Prepare Vectors (Pool -> Flatten -> Normalize)
         t_vec = F.normalize(F.adaptive_avg_pool2d(t_proj, 1).flatten(1), dim=1)
         s_vec = F.normalize(F.adaptive_avg_pool2d(s_proj, 1).flatten(1), dim=1)
 
         result = {"teacher_logits": t_logits, "student_logits": s_logits}
 
         if self.training_mode == "discriminator":
-            # --- TRAIN DISCRIMINATOR ---
-            # D tries to:
-            # 1. Classify Teacher as Real (1)
-            # 2. Classify Student as Fake (0)
-            # 3. Minimize L2C on Teacher Features (Cluster them properly)
-
+            # --- CORRECTED: PURE ADVERSARIAL TRAINING ---
             t_pred = self.discriminator(t_proj)
-            s_pred = self.discriminator(s_proj.detach())  # Detach student
+            s_pred = self.discriminator(s_proj.detach())
 
             real_lbl = torch.ones(batch_size, 1, device=x.device)
             fake_lbl = torch.zeros(batch_size, 1, device=x.device)
@@ -311,48 +298,39 @@ class ContraDKD(nn.Module):
                 self.bce_loss(t_pred, real_lbl) + self.bce_loss(s_pred, fake_lbl)
             )
 
-            # L2C on Teacher: Ensures the embedding space is structured by class
-            l2c_teacher = self.l2c_loss_mod(t_vec, targets)
-
             result["discriminator_loss"] = disc_loss.item()
-            result["l2c_teacher"] = l2c_teacher.item()
-
-            # Total D Loss
-            result["total_disc_loss"] = disc_loss + self.l2c_weight * l2c_teacher
+            result["total_disc_loss"] = disc_loss  # No L2C here
 
             # Metrics
             acc = ((t_pred > 0.5).float().mean() + (s_pred <= 0.5).float().mean()) / 2
             result["discriminator_accuracy"] = acc.item()
 
         else:
-            # --- TRAIN STUDENT ---
-            # S tries to:
-            # 1. Minimize DKD Loss (Match Logits)
-            # 2. Fool Discriminator (Adversarial)
-            # 3. Minimize L2C (Cluster features to same proxies as Teacher)
-
-            # A. DKD
+            # --- CORRECTED: STUDENT TRAINING WITH FULL OBJECTIVE ---
+            # A. DKD (Logit-level)
             dkd_loss = self.compute_dkd_loss(s_logits, t_logits, targets)
 
-            # B. Adversarial (Fool D -> Output 1)
+            # B. Adversarial (Fool Discriminator)
             s_pred = self.discriminator(s_proj)
             real_lbl = torch.ones(batch_size, 1, device=x.device)
             adv_loss = self.bce_loss(s_pred, real_lbl)
 
-            # C. L2C on Student
-            l2c_student = self.l2c_loss_mod(s_vec, targets)
+            # C. CORRECTED: L2C with Teacher Reference (data-data + data-class)
+            # Student features should align to:
+            # 1. Class prototypes (via class_embeddings)
+            # 2. Teacher features (via network_features parameter)
+            l2c_student = self.l2c_loss_mod(s_vec, targets, t_vec.detach())
 
             result["dkd"] = dkd_loss.item()
             result["adversarial"] = adv_loss.item()
             result["l2c_student"] = l2c_student.item()
             result["fool_rate"] = (s_pred > 0.5).float().mean().item()
 
-            # Total Internal Loss (Trainer adds CE)
-            # Return just the unified sum for the 'method_specific_loss' slot
+            # Total Internal Loss
             total_internal = (
                 dkd_loss + self.adv_weight * adv_loss + self.l2c_weight * l2c_student
             )
-            result["total_student_loss"] = total_internal  # For debug
+            result["total_student_loss"] = total_internal
             result["method_specific_loss"] = total_internal
 
         self.teacher_hooks.clear()
@@ -397,20 +375,18 @@ class ContraDKD(nn.Module):
 
     def get_optimizers(self, student_lr=1e-3, discriminator_lr=1e-4, weight_decay=1e-4):
         """
-        Returns two optimizers:
-        1. Student Optimizer: Student Net + Student Regressor
-        2. Discriminator Optimizer: Discriminator Net + Teacher Regressor + L2C Proxies
+        CORRECTED: Separate optimizers with proper parameter grouping.
         """
-        # Student Params
-        student_params = list(self.student.parameters()) + list(
-            self.student_regressor.parameters()
+        # Student: Student Net + Student Regressor + Class Embeddings
+        student_params = (
+            list(self.student.parameters())
+            + list(self.student_regressor.parameters())
+            + list(self.l2c_loss_mod.parameters())  # CORRECTED: Added here
         )
 
-        # Discriminator Params (Includes L2C Proxies)
-        discriminator_params = (
-            list(self.discriminator.parameters())
-            + list(self.teacher_regressor.parameters())
-            + list(self.l2c_loss_mod.parameters())
+        # Discriminator: Discriminator Net + Teacher Regressor
+        discriminator_params = list(self.discriminator.parameters()) + list(
+            self.teacher_regressor.parameters()
         )
 
         opt_s = torch.optim.Adam(
