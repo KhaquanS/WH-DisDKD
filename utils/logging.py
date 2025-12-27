@@ -20,6 +20,15 @@ class LossTracker:
                 "disc_accuracy",
                 "fool_rate",
             ],
+            "ContraDKD": [
+                "dkd",
+                "discriminator",
+                "adversarial",
+                "disc_accuracy",
+                "fool_rate",
+                "l2c_teacher",  # New metric
+                "l2c_student",  # New metric
+            ],
         }
         if method in method_headers:
             self.headers.extend(method_headers[method])
@@ -64,6 +73,15 @@ class LossTracker:
                 "adversarial",
                 "disc_accuracy",
                 "fool_rate",
+            ],
+            "ContraDKD": [
+                "dkd",
+                "discriminator",
+                "adversarial",
+                "disc_accuracy",
+                "fool_rate",
+                "l2c_teacher",  # New metric
+                "l2c_student",  # New metric
             ],
         }
         for k in method_losses.get(self.method, []):

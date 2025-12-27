@@ -5,6 +5,7 @@ from distill.fitnet import FitNet
 from distill.dkd import DKD
 from distill.logits_kd import LogitKD
 from distill.crd import CRD
+from distill.ContraDKD import ContraDKD
 from utils.utils import count_params
 
 
@@ -64,6 +65,21 @@ def create_distillation_model(args, teacher, student, num_classes: int):
             momentum=args.crd_momentum,
             n_negatives=args.crd_n_negatives,
         ),
+        "ContraDKD": lambda: ContraDKD(
+            teacher=teacher,
+            student=student,
+            teacher_layer=args.teacher_layer,
+            student_layer=args.student_layer,
+            teacher_channels=teacher_channels,
+            student_channels=student_channels,
+            hidden_channels=args.hidden_channels,
+            num_classes=num_classes,
+            alpha=args.dkd_alpha,
+            beta=args.dkd_beta,
+            temperature=args.tau,
+            l2c_weight=args.l2c_weight,
+            adv_weight=args.disdkd_adversarial_weight,  # Reuse this arg or add new one
+        ),
     }
 
     return models[args.method]()
@@ -72,9 +88,9 @@ def create_distillation_model(args, teacher, student, num_classes: int):
 def print_model_parameters(model, method_name: str):
     """Print parameter counts for model components."""
     print(f"\n=== {method_name} Model Parameters ===")
-    
+
     total_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    
+
     if method_name == 'Pretraining':
         print(f"Teacher Model: {count_params(model.teacher):,} parameters")
     else:
@@ -82,17 +98,27 @@ def print_model_parameters(model, method_name: str):
             print(f"Student: {count_params(model.student):,} parameters")
         if hasattr(model, 'teacher'):
             print(f"Teacher: {count_params(model.teacher):,} parameters (frozen)")
-    
+
     # Method-specific components
     method_params = {
-        'FitNet': [('adapter', 'hint_criterion.adaptation', 'module')],
-        'CRD': [('teacher_projector', 'teacher_projector', 'module'), 
-                ('student_projector', 'student_projector', 'module')],
-        'DisDKD': [('teacher_regressor', 'teacher_regressor', 'module'),
-                   ('student_regressor', 'student_regressor', 'module'),
-                   ('discriminator', 'discriminator', 'module')],
+        "FitNet": [("adapter", "hint_criterion.adaptation", "module")],
+        "CRD": [
+            ("teacher_projector", "teacher_projector", "module"),
+            ("student_projector", "student_projector", "module"),
+        ],
+        "DisDKD": [
+            ("teacher_regressor", "teacher_regressor", "module"),
+            ("student_regressor", "student_regressor", "module"),
+            ("discriminator", "discriminator", "module"),
+        ],
+        "ContraDKD": [
+            ("teacher_regressor", "teacher_regressor", "module"),
+            ("student_regressor", "student_regressor", "module"),
+            ("discriminator", "discriminator", "module"),
+            ("l2c_proxies", "l2c_loss_mod.class_embeddings", "parameter"),
+        ],
     }
-    
+
     if method_name in method_params:
         for item in method_params[method_name]:
             if len(item) == 3:
@@ -100,7 +126,7 @@ def print_model_parameters(model, method_name: str):
             else:
                 name, attr_path = item
                 obj_type = 'module'
-            
+
             obj = model
             for attr in attr_path.split('.'):
                 if hasattr(obj, attr):
@@ -108,7 +134,7 @@ def print_model_parameters(model, method_name: str):
                 else:
                     obj = None
                     break
-            
+
             if obj is not None:
                 if obj_type == 'parameter':
                     # For nn.Parameter objects
@@ -119,6 +145,6 @@ def print_model_parameters(model, method_name: str):
                 else:
                     # For nn.Module objects
                     print(f"{name.capitalize()}: {count_params(obj):,} parameters")
-    
+
     print(f"Total trainable: {total_trainable:,} parameters")
     print("=" * 50)

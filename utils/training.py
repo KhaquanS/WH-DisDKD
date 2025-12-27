@@ -116,6 +116,10 @@ class Trainer:
     def train(self, train_loader, val_loader):
         """Main training loop with FitNet 2-Stage Logic."""
         print(f"\nStarting training for {self.args.epochs} epochs...")
+
+        if self.args.method == "ContraDKD":
+            self.model.initialize_class_embeddings(train_loader, self.device)
+
         best_acc = 0.0
 
         # --- FROM YOUR COMMIT: 2-STAGE LOGIC START ---
@@ -146,7 +150,7 @@ class Trainer:
             # ------------------------------------
 
             # Train and validate
-            if self.args.method in ["DisDKD"]:
+            if self.args.method in ["DisDKD", "ContraDKD"]:
                 train_losses, train_acc = self._train_epoch_adversarial(
                         train_loader, epoch
                     )
@@ -179,6 +183,20 @@ class Trainer:
                         f"DKD: {dkd_loss:.4f}, Disc: {disc_loss:.4f}, Adv: {adv_loss:.4f} | "
                         f"Time: {elapsed:.1f}s"
                     )
+                
+            elif self.args.method == "ContraDKD":
+                # --- ADD THIS BLOCK ---
+                disc_acc = train_losses.get("disc_accuracy", 0) * 100
+                fool_rate = train_losses.get("fool_rate", 0) * 100
+                l2c_t = train_losses.get("l2c_teacher", 0)
+                l2c_s = train_losses.get("l2c_student", 0)
+                
+                print(
+                    f"Epoch {epoch}: Train {train_acc:.2f}%, Val {val_acc:.2f}% | "
+                    f"D_Acc: {disc_acc:.1f}%, Fool: {fool_rate:.1f}% | "
+                    f"L2C(T): {l2c_t:.4f}, L2C(S): {l2c_s:.4f} | "
+                    f"Time: {elapsed:.1f}s"
+                )
             else:
                 # Use your stage_name logging (for FitNet/others)
                 print(

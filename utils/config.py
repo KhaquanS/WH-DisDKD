@@ -63,7 +63,7 @@ def parse_args():
         "--method",
         type=str,
         default="LogitKD",
-        choices=["Pretraining", "LogitKD", "DKD", "DisDKD", "FitNet", "CRD"],
+        choices=["Pretraining", "LogitKD", "DKD", "DisDKD", "FitNet", "CRD", "ContraDKD"],
     )
     parser.add_argument("--teacher_layer", type=str, default="layer3")
     parser.add_argument("--student_layer", type=str, default="layer2")
@@ -106,6 +106,14 @@ def parse_args():
         type=int,
         default=0,
         help="Number of epochs for FitNet Stage 1 (Hint only)",
+    )
+
+    # ContraDKD-specific hyperparamters
+    parser.add_argument(
+        "--l2c_weight",
+        type=float,
+        default=0.5,
+        help="Weight for L2C contrastive loss in ContraDKD",
     )
 
     # CRD-specific hyperparameters
