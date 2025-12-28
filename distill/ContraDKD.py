@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.nn.utils.parametrizations import spectral_norm
 from collections import OrderedDict
 from utils.utils import get_module, count_params
 
@@ -29,12 +30,14 @@ class FeatureHooks:
 
 
 class FeatureRegressor(nn.Module):
-    """1x1 Conv to project features to common dimension."""
+    """1x1 Conv with BatchNorm to stabilize statistics."""
 
     def __init__(self, in_channels, hidden_channels):
         super(FeatureRegressor, self).__init__()
-        self.regressor = nn.Conv2d(
-            in_channels, hidden_channels, kernel_size=1, bias=False
+        self.regressor = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_channels, kernel_size=1, bias=False),
+            nn.BatchNorm2d(hidden_channels),  # Added BN
+            nn.ReLU(inplace=True),  # Optional: Non-linearity helps alignment
         )
 
     def forward(self, x):
@@ -49,13 +52,15 @@ class FeatureDiscriminator(nn.Module):
         self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.discriminator = nn.Sequential(
             nn.Flatten(),
-            nn.Linear(hidden_channels, hidden_channels // 2),
-            nn.ReLU(inplace=True),
+            # 1. Use Spectral Norm
+            spectral_norm(nn.Linear(hidden_channels, hidden_channels // 2)),
+            # 2. Use LeakyReLU (slope 0.2 is standard for GANs)
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(hidden_channels // 2, hidden_channels // 4),
-            nn.ReLU(inplace=True),
+            spectral_norm(nn.Linear(hidden_channels // 2, hidden_channels // 4)),
+            nn.LeakyReLU(0.2, inplace=True),
             nn.Dropout(0.2),
-            nn.Linear(hidden_channels // 4, 1),
+            spectral_norm(nn.Linear(hidden_channels // 4, 1)),
             nn.Sigmoid(),
         )
 
@@ -288,8 +293,8 @@ class ContraDKD(nn.Module):
 
         if self.training_mode == "discriminator":
             # --- CORRECTED: PURE ADVERSARIAL TRAINING ---
-            t_pred = self.discriminator(t_proj)
-            s_pred = self.discriminator(s_proj.detach())
+            t_pred = self.discriminator(t_vec)
+            s_pred = self.discriminator(s_vec.detach())
 
             # Instead of hard 0/1 labels, use smoothed versions
             real_lbl = torch.ones(batch_size, 1, device=x.device) * 0.9  # 0.9 instead of 1.0
@@ -312,7 +317,7 @@ class ContraDKD(nn.Module):
             dkd_loss = self.compute_dkd_loss(s_logits, t_logits, targets)
 
             # B. Adversarial (Fool Discriminator)
-            s_pred = self.discriminator(s_proj)
+            s_pred = self.discriminator(s_vec)
             real_lbl = torch.ones(batch_size, 1, device=x.device)
             adv_loss = self.bce_loss(s_pred, real_lbl)
 
