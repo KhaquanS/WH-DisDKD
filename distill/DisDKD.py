@@ -380,8 +380,8 @@ class DisDKD(nn.Module):
             # Calculate fool rate (how many times student fooled discriminator)
             fool_rate = (student_pred > 0.5).float().mean().item()
 
-            result["dkd_loss"] = dkd_loss.item()
-            result["adversarial_loss"] = adversarial_loss.item()
+            result["dkd"] = dkd_loss.item()
+            result["adversarial"] = adversarial_loss.item()
             result["fool_rate"] = fool_rate
             result["total_student_loss"] = adversarial_loss
             result["method_specific_loss"] = dkd_loss
