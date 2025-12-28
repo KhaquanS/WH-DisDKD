@@ -37,7 +37,7 @@ class FeatureRegressor(nn.Module):
         self.regressor = nn.Sequential(
             nn.Conv2d(in_channels, hidden_channels, kernel_size=1, bias=False),
             nn.BatchNorm2d(hidden_channels),  # Added BN
-            nn.ReLU(inplace=True),  # Optional: Non-linearity helps alignment
+            # nn.ReLU(inplace=True),  # Optional: Non-linearity helps alignment
         )
 
     def forward(self, x):
