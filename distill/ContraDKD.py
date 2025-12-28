@@ -49,7 +49,7 @@ class FeatureDiscriminator(nn.Module):
 
     def __init__(self, hidden_channels):
         super(FeatureDiscriminator, self).__init__()
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        # self.global_pool = nn.AdaptiveAvgPool2d(1)
         self.discriminator = nn.Sequential(
             nn.Flatten(),
             # 1. Use Spectral Norm
@@ -65,8 +65,8 @@ class FeatureDiscriminator(nn.Module):
         )
 
     def forward(self, x):
-        pooled = self.global_pool(x)
-        return self.discriminator(pooled)
+        # pooled = self.global_pool(x)
+        return self.discriminator(x)
 
 
 class L2CContrastiveLoss(nn.Module):
